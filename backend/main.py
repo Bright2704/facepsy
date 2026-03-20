@@ -39,7 +39,7 @@ app.add_middleware(
 )
 
 # Model paths
-MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
 AU_MODEL_PATH = os.path.join(MODEL_DIR, "AU_200.tflite")
 FACE_LANDMARKER_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
 
@@ -483,12 +483,17 @@ async def process_image(image):
         x_min, x_max = int(min(x_coords)), int(max(x_coords))
         y_min, y_max = int(min(y_coords)), int(max(y_coords))
 
-        # Add padding
-        padding = 20
-        x_min = max(0, x_min - padding)
-        y_min = max(0, y_min - padding)
-        x_max = min(w, x_max + padding)
-        y_max = min(h, y_max + padding)
+        # Add proportional padding to ensure eyebrows and chin are properly visible for AU prediction
+        w_diff = x_max - x_min
+        h_diff = y_max - y_min
+        pad_w = int(w_diff * 0.25)
+        pad_h = int(h_diff * 0.25)
+        top_pad = int(h_diff * 0.35)  # Extra padding on top for eyebrows (AU04)
+
+        x_min = max(0, x_min - pad_w)
+        y_min = max(0, y_min - top_pad)
+        x_max = min(w, x_max + pad_w)
+        y_max = min(h, y_max + pad_h)
     else:
         x_min, y_min, x_max, y_max = bbox
 

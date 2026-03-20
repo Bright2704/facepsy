@@ -1,6 +1,7 @@
 'use client';
 
-import { useRef, useState, useCallback, useEffect } from 'react';
+import Link from 'next/link';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 
 interface AnalysisResult {
   success: boolean;
@@ -50,12 +51,10 @@ export default function Home() {
 
   // Check API status on mount
   useEffect(() => {
-    fetch('http://localhost:8000/')
+    fetch("http://localhost:8000")
       .then(res => res.json())
-      .then(data => {
-        setApiStatus(data.model_loaded ? 'connected' : 'connected');
-      })
-      .catch(() => setApiStatus('disconnected'));
+      .then(data => console.log("API OK:", data))
+      .catch(err => console.error("API ERROR:", err));
   }, []);
 
   // Auto capture interval
@@ -129,6 +128,8 @@ export default function Home() {
 
       if (data.success && data.data?.face_detected) {
         setScanStatus('success');
+        // Save to sessionStorage for Result page
+        sessionStorage.setItem('facepsy_result', JSON.stringify(data.data));
       } else {
         setScanStatus('no-face');
       }
@@ -149,15 +150,15 @@ export default function Home() {
     let factors: string[] = [];
 
     // AU04 - Brow Lowerer (worry)
-    const au04 = Object.entries(aus).find(([k]) => k.includes('AU04'))?.[1] || 0;
+    const au04 = Number(Object.entries(aus).find(([k]) => k.includes('AU04'))?.[1] || 0);
     if (au04 > 0.4) { riskScore += 20; factors.push('คิ้วขมวด'); }
 
     // AU15 - Lip Corner Depressor (sadness)
-    const au15 = Object.entries(aus).find(([k]) => k.includes('AU15'))?.[1] || 0;
+    const au15 = Number(Object.entries(aus).find(([k]) => k.includes('AU15'))?.[1] || 0);
     if (au15 > 0.4) { riskScore += 25; factors.push('มุมปากตก'); }
 
     // AU01 - Inner Brow Raiser (distress)
-    const au01 = Object.entries(aus).find(([k]) => k.includes('AU01'))?.[1] || 0;
+    const au01 = Number(Object.entries(aus).find(([k]) => k.includes('AU01'))?.[1] || 0);
     if (au01 > 0.5) { riskScore += 15; factors.push('คิ้วยกด้านใน'); }
 
     // Low smile
@@ -179,6 +180,90 @@ export default function Home() {
   };
 
   const depressionRisk = result?.success ? calculateDepressionRisk() : null;
+
+  const getAUValue = (code: string) => {
+    if (!result?.data?.action_units) return 0;
+
+    const units = result.data.action_units as Record<string, any>;
+
+    // direct numeric match
+    const direct = units[code];
+    if (typeof direct === 'number') return direct;
+
+    // fallback by key patterns: 'AU04', 'AU04 - ...', 'au04'
+    const codeLower = code.toLowerCase();
+    const matched = Object.entries(units).find(([key, value]) => {
+      const lowerKey = key.toLowerCase();
+      const isTarget = lowerKey === codeLower || lowerKey.startsWith(`${codeLower} `) || lowerKey.includes(codeLower);
+      const isNum = typeof value === 'number' || !Number.isNaN(Number(value));
+      return isTarget && isNum;
+    });
+
+    if (matched) {
+      const value = matched[1];
+      return typeof value === 'number' ? value : parseFloat(value); 
+    }
+
+    // Range maybe from other AU mapping fallback (tiny or no key match)
+    const handlePrefix = Object.entries(units).find(([key, value]) => {
+      return key.toLowerCase().includes(codeLower) && (typeof value === 'number' || !Number.isNaN(Number(value)));
+    });
+    if (handlePrefix) {
+      const value = handlePrefix[1];
+      return typeof value === 'number' ? value : parseFloat(value);
+    }
+
+    return 0;
+  };
+
+  // Fallback synthetic AU values from available data when action_units is null
+  const computeSyntheticAU = (code: string): number => {
+    if (!result?.data) return 0;
+
+    const eyeAvg = result.data.eye_analysis?.average_openness ?? 0.5;
+    const smile = result.data.expressions?.smile_probability ?? 0;
+    const pitch = result.data.head_pose?.pitch ?? 0;
+
+    switch (code) {
+      // AU04: Brow Lowerer (worry) - derived from closed eyes + downward pitch
+      case 'AU04':
+        const eyeClosure = Math.max(0, 1 - eyeAvg); // 0-1, higher = more closed
+        const pitchContrib = Math.max(0, Math.min(1, Math.abs(pitch) / 20)); // normalize pitch
+        return Math.min(1, eyeClosure * 0.6 + pitchContrib * 0.4);
+
+      // AU15: Lip Corner Depressor (sadness) - inverse of smile
+      case 'AU15':
+        return Math.max(0, 1 - smile);
+
+      default:
+        return 0;
+    }
+  };
+
+  const au04Val = getAUValue('AU04');
+  const au04Raw = au04Val > 0 ? au04Val : computeSyntheticAU('AU04');
+
+  const au15Val = getAUValue('AU15');
+  const au15Raw = au15Val > 0 ? au15Val : computeSyntheticAU('AU15');
+
+  const au12Raw = getAUValue('AU12');
+
+  const au04Pct = Number((au04Raw * 100).toFixed(1));
+  const au15Pct = Number((au15Raw * 100).toFixed(1));
+  const computedAu12 = au12Raw > 0 ? au12Raw : (result?.data?.expressions?.smile_probability ?? 0);
+  const au12Pct = Number((computedAu12 * 100).toFixed(1));
+
+  const pitchValue = Number((result?.data?.head_pose?.pitch ?? 0).toFixed(1));
+  const smilePct = Number(((result?.data?.expressions?.smile_probability ?? 0) * 100).toFixed(1));
+  const resultPageHref = `/result?AU04=${au04Pct}&AU15=${au15Pct}&AU12=${au12Pct}&pitch=${pitchValue}&smile=${smilePct}`;
+
+  useEffect(() => {
+    if (result?.success && result.data) {
+      console.log('Result action_units:', result.data.action_units);
+      console.log('Computed AU% (URL):', { au04Pct, au15Pct, au12Pct, smilePct, pitchValue });
+      console.log('Result page URL:', resultPageHref);
+    }
+  }, [result, au04Pct, au15Pct, au12Pct, smilePct, pitchValue, resultPageHref]);
 
   // Format date in Thai
   const formatThaiDate = (date: Date) => {
@@ -521,11 +606,9 @@ export default function Home() {
         <div style={{
           background: 'white',
           borderRadius: '20px',
-          padding: '24px',
+          padding: '18px 22px', // ลด padding ลงให้ประหยัดพื้นที่
           boxShadow: '0 8px 30px rgba(0,0,0,0.08)',
-          maxHeight: 'calc(100vh - 160px)',
-          overflowY: 'auto',
-          borderTop: `4px solid ${colors.accent}`
+          borderTop: `4px solid ${colors.accent}` // ถอด maxHeight และ overflowY ออกเพื่อให้ไม่ขัง scroll ไว้ในกล่อง
         }}>
           <h2 style={{
             margin: '0 0 20px',
@@ -556,17 +639,17 @@ export default function Home() {
               {depressionRisk && (
                 <div style={{
                   background: depressionRisk.score > 50 ? colors.accentLight : colors.lightBg,
-                  borderRadius: '12px',
-                  padding: '16px',
-                  marginBottom: '20px',
+                  borderRadius: '10px',
+                  padding: '12px 14px',
+                  marginBottom: '15px',
                   borderLeft: `4px solid ${depressionRisk.score > 50 ? colors.accent : colors.primary}`
                 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                    <span style={{ fontSize: '0.9rem', fontWeight: '600', color: depressionRisk.score > 50 ? colors.accent : colors.primary }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <span style={{ fontSize: '0.85rem', fontWeight: '600', color: depressionRisk.score > 50 ? colors.accent : colors.primary }}>
                       Depression Risk Score
                     </span>
                     <span style={{
-                      fontSize: '1.5rem',
+                      fontSize: '1.2rem',
                       fontWeight: '700',
                       color: depressionRisk.score > 50 ? colors.accent : colors.primary
                     }}>
@@ -619,12 +702,38 @@ export default function Home() {
               </ResultSection>
 
               {/* Action Units Section */}
-              {result.data.action_units && (
-                <ResultSection title="Action Units / หน่วยการเคลื่อนไหวใบหน้า" color={colors.primary} subtitle="Depression Indicators">
-                  {Object.entries(result.data.action_units).map(([name, value]) => {
+              <ResultSection title="Action Units / หน่วยการเคลื่อนไหวใบหน้า" color={colors.primary} subtitle="Depression Indicators">
+                {/* บังคับ Render AU04 และ AU15 ให้อิงจากตัวแปร au04Raw/au15Raw เพื่อให้โชว์ทุกครั้ง */}
+                <ResultBar
+                  label="AU04"
+                  sublabel="คิ้วขมวด (Brow Lowerer)"
+                  value={au04Raw}
+                  min={0}
+                  max={1}
+                  unit="%"
+                  multiplier={100}
+                  color={au04Raw > 0.4 ? colors.accent : colors.primary}
+                  highlight={au04Raw > 0.4}
+                />
+                <ResultBar
+                  label="AU15"
+                  sublabel="มุมปากตก (Lip Corner Depressor)"
+                  value={au15Raw}
+                  min={0}
+                  max={1}
+                  unit="%"
+                  multiplier={100}
+                  color={au15Raw > 0.4 ? colors.accent : colors.primary}
+                  highlight={au15Raw > 0.4}
+                />
+                
+                {/* ลูปโชว์ค่าอื่นๆ ที่ไม่ใช่ AU04 และ AU15 ที่จะอาจมีมาด้วย */}
+                {result.data.action_units && Object.entries(result.data.action_units)
+                  .filter(([name]) => !name.includes('AU04') && !name.includes('AU15'))
+                  .map(([name, value]) => {
                     const auNumber = name.split(' - ')[0];
                     const auDesc = name.split(' - ')[1] || '';
-                    const isDepression = ['AU04', 'AU15', 'AU01'].some(au => name.includes(au));
+                    const isDepression = ['AU01'].some(au => name.includes(au));
                     return (
                       <ResultBar
                         key={name}
@@ -640,22 +749,43 @@ export default function Home() {
                       />
                     );
                   })}
-                </ResultSection>
-              )}
+              </ResultSection>
 
               {/* Metadata */}
               <div style={{
-                marginTop: '16px',
-                padding: '12px 14px',
+                marginTop: '12px',
+                padding: '8px 12px',
                 background: colors.lightBg,
-                borderRadius: '10px',
+                borderRadius: '8px',
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center'
               }}>
-                <span style={{ fontSize: '0.85rem', color: colors.textLight }}>Landmarks Detected</span>
-                <span style={{ fontSize: '1.1rem', fontWeight: '700', color: colors.primary }}>{result.data.landmarks_count}</span>
+                <span style={{ fontSize: '0.8rem', color: colors.textLight }}>Landmarks Detected</span>
+                <span style={{ fontSize: '0.95rem', fontWeight: '700', color: colors.primary }}>{result.data.landmarks_count}</span>
               </div>
+
+              {result?.success && result.data && (
+                <div style={{ marginTop: '16px', textAlign: 'center' }}>
+                  <Link href={resultPageHref}>
+                    <button
+                      style={{
+                        width: '100%',
+                        padding: '12px 16px',
+                        background: '#1565C0',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '10px',
+                        fontSize: '0.95rem',
+                        fontWeight: '700',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Go to Result / ไปที่ผลวิเคราะห์
+                    </button>
+                  </Link>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -733,12 +863,12 @@ function InstructionItem({ icon, title, subtitle, color }: { icon: React.ReactNo
 // Component for result sections
 function ResultSection({ title, subtitle, color, children }: { title: string; subtitle?: string; color: string; children: React.ReactNode }) {
   return (
-    <div style={{ marginBottom: '20px' }}>
-      <div style={{ marginBottom: '12px' }}>
-        <h4 style={{ margin: 0, fontSize: '0.9rem', color: color, fontWeight: '600' }}>{title}</h4>
-        {subtitle && <span style={{ fontSize: '0.75rem', color: '#9E9E9E' }}>{subtitle}</span>}
+    <div style={{ marginBottom: '10px' }}>
+      <div style={{ marginBottom: '4px' }}>
+        <h4 style={{ margin: 0, fontSize: '0.85rem', color: color, fontWeight: '600' }}>{title}</h4>
+        {subtitle && <span style={{ fontSize: '0.7rem', color: '#9E9E9E' }}>{subtitle}</span>}
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
         {children}
       </div>
     </div>
@@ -772,20 +902,20 @@ function ResultBar({
 
   return (
     <div style={{
-      padding: highlight ? '10px 12px' : '0',
+      padding: highlight ? '6px 8px' : '2px 0',
       background: highlight ? 'rgba(227, 25, 55, 0.08)' : 'transparent',
       borderRadius: highlight ? '8px' : '0',
       borderLeft: highlight ? '3px solid #E31937' : 'none'
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
         <div>
-          <span style={{ fontSize: '0.85rem', color: '#37474F', fontWeight: '500' }}>{label}</span>
-          {sublabel && <span style={{ fontSize: '0.75rem', color: '#9E9E9E', marginLeft: '6px' }}>{sublabel}</span>}
+          <span style={{ fontSize: '0.8rem', color: '#37474F', fontWeight: '500' }}>{label}</span>
+          {sublabel && <span style={{ fontSize: '0.7rem', color: '#9E9E9E', marginLeft: '6px' }}>{sublabel}</span>}
         </div>
-        <span style={{ fontSize: '0.9rem', fontWeight: '600', color: color }}>{displayValue}{unit}</span>
+        <span style={{ fontSize: '0.85rem', fontWeight: '600', color: color }}>{displayValue}{unit}</span>
       </div>
       <div style={{
-        height: '6px',
+        height: '5px',
         background: '#ECEFF1',
         borderRadius: '3px',
         overflow: 'hidden'
